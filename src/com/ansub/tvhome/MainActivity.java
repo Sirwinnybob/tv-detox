@@ -29,6 +29,8 @@ import android.net.NetworkRequest;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -73,6 +75,7 @@ public class MainActivity extends Activity {
     private static final String PLAY_STORE = "com.android.vending";
     private static final String SETTINGS = "settings";
     private static final String ADD = "add";
+    private static final String APP_LIST = "applist";
     private static final String[] EDIT_ITEMS = {"Move", "Replace", "Remove from home", "Uninstall"};
     private static final String[] EDIT_ITEMS_SYSTEM = {"Move", "Replace", "Remove from home", "App info"};
     private static final int PER_ROW = 6, MAX_INPUTS = 4;
@@ -91,7 +94,12 @@ public class MainActivity extends Activity {
     private static final int MARGIN = 96, GAP = 36, RADIUS = 22;
     private static final int ROW1_TOP = 604, ROW_STEP = 224;
     private static final int GRID_MIN_TOP = 400; // more rows push the grid up, but not into the clock
-    private static final int ICON_TOP = 76, ICON_BUTTON = 72, ICON_SIZE = 40, ICON_GAP = 12; // level with the date
+    // Tucked into the top right corner, clear of South Korea's clock.
+    private static final int ICON_TOP = 18, ICON_EDGE = 34, ICON_BUTTON = 72, ICON_SIZE = 40, ICON_GAP = 12;
+    // The two clocks start level, and the "hours ahead" pill sits level with their digits.
+    private static final int CLOCK_TOP = 50, GAP_PILL_TOP = 150;
+    // Accent colours: warm for here, cool for South Korea. The pill between the clocks blends the two.
+    private static final int HERE = 0xFFFFA45C, KOREA = 0xFF7DB4FF;
 
     // The Settings tile opens a small menu: the home screen's own settings, then the TV's.
     private static final String[] SETTINGS_ITEMS = {"Wallpaper", "Brightness", "TV settings"};
@@ -152,7 +160,9 @@ public class MainActivity extends Activity {
     private ImageView netIcon;
     private int netState = -1;
     private final ConnectivityManager.NetworkCallback networkChanged = new ConnectivityManager.NetworkCallback() {
-        @Override public void onAvailable(Network n) { runOnUiThread(MainActivity.this::refreshNetwork); }
+        @Override public void onAvailable(Network n) {
+            runOnUiThread(() -> { refreshNetwork(); maybeFetchWeather(); });
+        }
         @Override public void onLost(Network n) { runOnUiThread(MainActivity.this::refreshNetwork); }
         // Also fires when the Wi-Fi signal gets stronger or weaker.
         @Override public void onCapabilitiesChanged(Network n, NetworkCapabilities c) {
@@ -160,9 +170,25 @@ public class MainActivity extends Activity {
         }
     };
 
+    // Weather under the TV's own clock and under South Korea's, for the places set with --es weather
+    // (see Weather). The last reply is saved, so it shows straight away after a restart.
+    private static final long WEATHER_STALE_MS = 6 * 60 * 60 * 1000L; // older than this isn't shown
+    private final WeatherCard[] weatherCards = new WeatherCard[Weather.MAX];
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private long weatherTried; // last request, so a failing network is retried every few minutes, not constantly
+    private boolean weatherFetching;
+    // While Home is in front, checks every few minutes whether the weather is due (every 30 minutes).
+    private final Runnable weatherTick = new Runnable() {
+        @Override public void run() {
+            maybeFetchWeather();
+            handler.postDelayed(this, Weather.RETRY_MS);
+        }
+    };
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        CastHook.start(this);
         saveConfig(getIntent());
         loadFonts();
         scale = getResources().getDisplayMetrics().widthPixels / 1920f;
@@ -177,22 +203,24 @@ public class MainActivity extends Activity {
         root.setClipChildren(false);
         scroller.addView(root, new FrameLayout.LayoutParams(-1, -2));
 
-        LinearLayout clock = new LinearLayout(this);
-        clock.setOrientation(LinearLayout.VERTICAL);
         shownLocale = java.util.Locale.getDefault();
-        String day = Strings.datePattern();
-        TextClock date = clock(day, day, px(30), 0xA8FFFFFF, regular);
-        TextClock time = clock("h:mm", "H:mm", px(176), Color.WHITE, semibold);
-        time.setLetterSpacing(-0.028f);
-        time.setFontFeatureSettings("tnum");
-        time.setIncludeFontPadding(false);
-        // Wrap, not the default match_parent: the column must be as wide as the date, not just the time,
-        // or "0:00" to "9:59" (one digit less) cuts a long date off.
-        clock.addView(date, new LinearLayout.LayoutParams(-2, -2));
-        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(-2, -2);
-        tp.topMargin = px(-20); // pull the big digits up under the date
-        clock.addView(time, tp);
-        root.addView(clock, at(px(MARGIN), px(92), -2, -2));
+        // Two matching clocks: the TV's own time on the left (labelled with --es here, "HERE" until
+        // then), South Korea's on the right, each with a coloured place label, the date, the time and its
+        // weather card. Between them, a pill says how far ahead Korea is.
+        String here = getSharedPreferences(PREFS, 0).getString("here", "HERE");
+        root.addView(clockColumn(here, false, HERE, 0, Gravity.START), at(px(MARGIN), px(CLOCK_TOP), -2, -2));
+        FrameLayout.LayoutParams kl = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END);
+        kl.topMargin = px(CLOCK_TOP);
+        kl.rightMargin = px(MARGIN);
+        root.addView(clockColumn("대한민국", true, KOREA, 1, Gravity.END), kl);
+        refreshKoreanClocks(); // filled in now, not a moment later in onResume
+        FrameLayout.LayoutParams gl = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        gl.topMargin = px(CLOCK_TOP + GAP_PILL_TOP);
+        root.addView(timeGapBar(), gl);
+
+        SharedPreferences prefs = getSharedPreferences(PREFS, 0);
+        if (System.currentTimeMillis() - prefs.getLong("weather_at", 0) < WEATHER_STALE_MS)
+            showWeather(Weather.parse(prefs.getString("weather_json", ""), spots()));
 
         moveHint = text(px(24), 0xA8FFFFFF, regular);
         moveHint.setText(Strings.t("Use the arrows to move it, then press OK"));
@@ -218,6 +246,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        handler.removeCallbacks(weatherTick);
+        handler.removeCallbacks(clockTick);
         unregisterReceiver(packagesChanged);
         ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         if (cm != null) try { cm.unregisterNetworkCallback(networkChanged); } catch (Exception ignored) {}
@@ -228,17 +258,27 @@ public class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
-        if (saveConfig(intent)) buildTiles();
+        if (saveConfig(intent)) {
+            if (placesChanged) recreate(); // clock label or weather places: start over with them
+            else buildTiles();
+        }
     }
 
     // Saves an app list passed with --es apps "..." and shortcuts passed with --es quick "...".
     // Returns true if it changed.
     // When Android kills the home screen in the background, it can start it again with the same old
     // intent; the stamp install.sh sends stops that from undoing changes made on the TV since.
+    // Also --es weather "Name,lat,lon;Name,lat,lon" (see Weather) and --es here "LABEL" for the TV's
+    // own clock; these set placesChanged.
+    private boolean placesChanged;
+
     private boolean saveConfig(Intent intent) {
         String apps = intent == null ? null : intent.getStringExtra("apps");
         String quick = intent == null ? null : intent.getStringExtra("quick");
-        if (apps == null && quick == null) return false;
+        String weather = intent == null ? null : intent.getStringExtra("weather");
+        String here = intent == null ? null : intent.getStringExtra("here");
+        placesChanged = false;
+        if (apps == null && quick == null && weather == null && here == null) return false;
         SharedPreferences prefs = getSharedPreferences(PREFS, 0);
         String stamp = intent.getStringExtra("stamp");
         if (stamp != null && stamp.equals(prefs.getString("stamp", null))) return false;
@@ -253,6 +293,15 @@ public class MainActivity extends Activity {
             quick = quick.trim();
             if (quick.isEmpty() || quick.equalsIgnoreCase("none")) e.remove("quick");
             else e.putString("quick", quick);
+        }
+        if (weather != null) {
+            // New places: the saved weather is for the old ones.
+            e.putString("places", weather.trim()).remove("weather_json").remove("weather_at");
+            placesChanged = true;
+        }
+        if (here != null) {
+            e.putString("here", here.trim());
+            placesChanged = true;
         }
         e.apply();
         dirty = true;
@@ -289,8 +338,272 @@ public class MainActivity extends Activity {
             buildTiles();
         }
         refreshNetwork();
+        CastHook.start(this); // in case VNC Cast Receiver was installed or updated since
+        handler.removeCallbacks(weatherTick);
+        handler.post(weatherTick);
+        handler.removeCallbacks(clockTick);
+        handler.post(clockTick);
+        refreshTimeGap();
         View f = getCurrentFocus();
         if (f == null && !tiles.isEmpty()) tiles.get(0).requestFocus();
+    }
+
+    @Override
+    protected void onPause() {
+        handler.removeCallbacks(weatherTick);
+        handler.removeCallbacks(clockTick);
+        super.onPause();
+    }
+
+    // One clock: a glowing dot and the place in spaced capitals, the date, then the time with a small
+    // AM/PM in the accent colour, and the place's weather card. korean: South Korea's time, written in
+    // Korean (Hangul); otherwise the TV's own time, in the TV's language.
+    private LinearLayout clockColumn(String place, boolean korean, int accent, int weatherPlace, int gravity) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout label = new LinearLayout(this);
+        label.setOrientation(LinearLayout.HORIZONTAL);
+        label.setGravity(Gravity.CENTER_VERTICAL);
+        View dot = new View(this);
+        GradientDrawable d = new GradientDrawable();
+        d.setShape(GradientDrawable.OVAL);
+        d.setColor(accent);
+        d.setStroke(px(5), accent & 0x4DFFFFFF); // a soft halo
+        dot.setBackground(d);
+        label.addView(dot, new LinearLayout.LayoutParams(px(20), px(20)));
+        TextView name = text(px(22), accent, semibold);
+        name.setText(place);
+        name.setLetterSpacing(korean ? 0.12f : 0.24f);
+        LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(-2, -2);
+        np.leftMargin = px(12);
+        label.addView(name, np);
+        col.addView(label, inColumn(gravity, 0));
+
+        TextView date, time, ampm;
+        if (korean) {
+            date = text(px(30), 0xA8FFFFFF, regular);
+            time = text(px(176), Color.WHITE, semibold);
+            ampm = text(px(40), accent, semibold);
+            koreanClocks.add(new TextView[] {date, time, ampm});
+        } else {
+            String day = Strings.datePattern();
+            date = clock(day, day, px(30), 0xA8FFFFFF, regular);
+            time = clock("h:mm", "H:mm", px(176), Color.WHITE, semibold);
+            ampm = clock("a", "", px(44), accent, semibold);
+        }
+        // A fixed height, so the Korean and English dates take the same room and the two sides line up.
+        date.setIncludeFontPadding(false);
+        date.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams dp = inColumn(gravity, px(10));
+        dp.height = px(44);
+        col.addView(date, dp);
+
+        // Digits and AM/PM share a baseline (LinearLayout lines them up on it by default).
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        time.setLetterSpacing(-0.028f);
+        time.setFontFeatureSettings("tnum");
+        time.setIncludeFontPadding(false);
+        // Korean puts 오전/오후 before the time; English puts AM/PM after it.
+        LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(-2, -2);
+        if (korean) {
+            ap.rightMargin = px(16);
+            row.addView(ampm, ap);
+            row.addView(time, new LinearLayout.LayoutParams(-2, -2));
+        } else {
+            ap.leftMargin = px(14);
+            row.addView(time, new LinearLayout.LayoutParams(-2, -2));
+            row.addView(ampm, ap);
+        }
+        col.addView(row, inColumn(gravity, px(-14))); // pull the big digits up under the date
+
+        addWeather(col, weatherPlace, gravity);
+        return col;
+    }
+
+    // South Korea's side is in Korean, so its date, time and 오전/오후 are formatted here with the
+    // Korean locale once a minute, rather than by TextClock (which follows the TV's language).
+    private final List<TextView[]> koreanClocks = new ArrayList<>(); // {date, time, ampm}
+    private final Runnable clockTick = new Runnable() {
+        @Override public void run() {
+            refreshKoreanClocks();
+            handler.postDelayed(this, 60000 - System.currentTimeMillis() % 60000 + 50); // just after the minute
+        }
+    };
+
+    private void refreshKoreanClocks() {
+        java.util.Date now = new java.util.Date();
+        boolean h24 = android.text.format.DateFormat.is24HourFormat(this);
+        for (TextView[] c : koreanClocks) {
+            c[0].setText(korean("M월 d일 EEEE", now));
+            c[1].setText(korean(h24 ? "H:mm" : "h:mm", now));
+            c[2].setText(h24 ? "" : korean("a", now));
+        }
+    }
+
+    private static String korean(String pattern, java.util.Date d) {
+        java.text.SimpleDateFormat f = new java.text.SimpleDateFormat(pattern, java.util.Locale.KOREAN);
+        f.setTimeZone(java.util.TimeZone.getTimeZone("Asia/Seoul"));
+        return f.format(d);
+    }
+
+    private static LinearLayout.LayoutParams inColumn(int gravity, int top) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+        lp.gravity = gravity;
+        lp.topMargin = top;
+        return lp;
+    }
+
+    // "Korea is 16 hours ahead" in a pill that blends the two accent colours, with hairlines fading out
+    // towards each clock. Worked out from the time zones, so it follows daylight saving.
+    private TextView timeGap;
+
+    private View timeGapBar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.addView(hairline(new int[] {HERE & 0x00FFFFFF, HERE & 0x8CFFFFFF}), new LinearLayout.LayoutParams(px(150), px(2)));
+        timeGap = text(px(24), 0xE6FFFFFF, regular);
+        timeGap.setLetterSpacing(0.04f);
+        GradientDrawable pill = new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[] {HERE & 0x38FFFFFF, KOREA & 0x38FFFFFF});
+        pill.setCornerRadius(px(40));
+        pill.setStroke(Math.max(1, px(2)), 0x24FFFFFF);
+        timeGap.setBackground(pill);
+        timeGap.setPadding(px(26), px(10), px(26), px(12));
+        LinearLayout.LayoutParams pp = new LinearLayout.LayoutParams(-2, -2);
+        pp.leftMargin = px(14);
+        pp.rightMargin = px(14);
+        bar.addView(timeGap, pp);
+        bar.addView(hairline(new int[] {KOREA & 0x8CFFFFFF, KOREA & 0x00FFFFFF}), new LinearLayout.LayoutParams(px(150), px(2)));
+        refreshTimeGap();
+        return bar;
+    }
+
+    private View hairline(int[] colors) {
+        View v = new View(this);
+        v.setBackground(new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, colors));
+        return v;
+    }
+
+    private void refreshTimeGap() {
+        if (timeGap == null) return;
+        long now = System.currentTimeMillis();
+        int mins = (java.util.TimeZone.getTimeZone("Asia/Seoul").getOffset(now)
+                - java.util.TimeZone.getDefault().getOffset(now)) / 60000;
+        int h = Math.abs(mins) / 60, m = Math.abs(mins) % 60;
+        String gap = h + (m == 0 ? "" : ":" + (m < 10 ? "0" : "") + m) + (h == 1 && m == 0 ? " hour" : " hours");
+        timeGap.setText(mins == 0 ? "Same time in Korea" : "Korea is " + gap + (mins > 0 ? " ahead" : " behind"));
+    }
+
+    // One place's weather on a soft glass card, like the app tiles: a colour icon, then the temperature
+    // (°F large, °C beside it), the place and sky, and the day's high and low. Hidden until there's
+    // weather to show. Added to the bottom of a clock column.
+    private void addWeather(LinearLayout column, int place, int gravity) {
+        WeatherCard w = new WeatherCard();
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        GradientDrawable glass = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[] {0x1FFFFFFF, 0x0DFFFFFF});
+        glass.setCornerRadius(px(RADIUS + 6));
+        glass.setStroke(Math.max(1, px(2)), 0x1FFFFFFF);
+        card.setBackground(glass);
+        card.setPadding(px(26), px(20), px(38), px(22));
+        card.setMinimumWidth(px(620)); // both cards the same width, so the two sides match
+
+        w.icon = new ImageView(this);
+        card.addView(w.icon, new LinearLayout.LayoutParams(px(124), px(124)));
+
+        LinearLayout words = new LinearLayout(this);
+        words.setOrientation(LinearLayout.VERTICAL);
+        w.temp = text(px(64), Color.WHITE, semibold);
+        w.temp.setIncludeFontPadding(false);
+        w.temp.setFontFeatureSettings("tnum");
+        w.sky = text(px(28), 0xEBFFFFFF, regular);
+        w.range = text(px(24), 0x9EFFFFFF, regular);
+        w.range.setFontFeatureSettings("tnum");
+        words.addView(w.temp, new LinearLayout.LayoutParams(-2, -2));
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(-2, -2);
+        sp.topMargin = px(6);
+        words.addView(w.sky, sp);
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-2, -2);
+        rp.topMargin = px(4);
+        words.addView(w.range, rp);
+        LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(-2, -2);
+        wp.leftMargin = px(24);
+        card.addView(words, wp);
+
+        card.setVisibility(View.GONE);
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-2, -2);
+        cp.gravity = gravity;
+        cp.topMargin = px(22);
+        column.addView(card, cp);
+        w.card = card;
+        weatherCards[place] = w;
+    }
+
+    private static final class WeatherCard {
+        View card;
+        ImageView icon;
+        TextView temp, sky, range;
+    }
+
+    // Places from Weather.parse, or null to hide the cards.
+    private void showWeather(Weather.Place[] places) {
+        for (int i = 0; i < weatherCards.length; i++) {
+            WeatherCard w = weatherCards[i];
+            Weather.Place p = places == null || i >= places.length ? null : places[i];
+            w.card.setVisibility(p == null ? View.GONE : View.VISIBLE);
+            if (p == null) continue;
+            w.icon.setImageDrawable(new WeatherIcon(p.code, p.day));
+            // Glass with a glow from the top left in the weather's colour.
+            int tint = WeatherIcon.tint(p.code, p.day);
+            GradientDrawable glass = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+                    new int[] {0x1AFFFFFF, 0x0AFFFFFF});
+            glass.setCornerRadius(px(RADIUS + 6));
+            glass.setStroke(Math.max(1, px(2)), tint & 0x40FFFFFF);
+            GradientDrawable glow = radial(tint & 0x4DFFFFFF, 0.12f, 0.1f, px(520));
+            glow.setCornerRadius(px(RADIUS + 6));
+            w.card.setBackground(new LayerDrawable(new Drawable[] {glow, glass}));
+            String f = Weather.f(p.now) + "°F", c = "   " + Weather.c(p.now) + "°C";
+            android.text.SpannableStringBuilder t = new android.text.SpannableStringBuilder(f + c);
+            t.setSpan(new android.text.style.AbsoluteSizeSpan(px(36)), f.length(), t.length(), 0);
+            t.setSpan(new android.text.style.ForegroundColorSpan(0xB3FFFFFF), f.length(), t.length(), 0);
+            w.temp.setText(t);
+            String sky = Weather.sky(p.code, p.korean);
+            w.sky.setText(sky.isEmpty() ? p.name : p.name + "  ·  " + sky);
+            w.range.setText((p.korean ? "최고 " : "High ") + Weather.both(p.high)
+                    + (p.korean ? "   ·   최저 " : "   ·   Low ") + Weather.both(p.low));
+        }
+    }
+
+    private List<Weather.Spot> spots() {
+        return Weather.spots(getSharedPreferences(PREFS, 0).getString("places", null));
+    }
+
+    // Asks Open-Meteo again once the saved weather is 30 minutes old, off the main thread. If it fails,
+    // the last weather stays up and it tries again a few minutes later.
+    private void maybeFetchWeather() {
+        long now = System.currentTimeMillis();
+        long got = getSharedPreferences(PREFS, 0).getLong("weather_at", 0);
+        final List<Weather.Spot> spots = spots();
+        if (spots.isEmpty() || weatherFetching || now - got < Weather.REFRESH_MS
+                || now - weatherTried < Weather.RETRY_MS) return;
+        weatherFetching = true;
+        weatherTried = now;
+        new Thread(() -> {
+            String json = Weather.fetch(spots);
+            Weather.Place[] places = json == null ? null : Weather.parse(json, spots);
+            runOnUiThread(() -> {
+                weatherFetching = false;
+                if (places == null) return;
+                getSharedPreferences(PREFS, 0).edit().putString("weather_json", json)
+                        .putLong("weather_at", System.currentTimeMillis()).apply();
+                showWeather(places);
+            });
+        }).start();
     }
 
     // Back from a menu or a window on top (like the uninstall prompt): catch up on apps that changed.
@@ -426,7 +739,8 @@ public class MainActivity extends Activity {
             addTile(root, pkg, label, banner, null, icon, gridX(i), gridY(i), w, h);
         }
 
-        // Bottom row: Play Store, HDMI inputs, Settings and Add app, six at most.
+        // Bottom row: Play Store, HDMI inputs, App list and Add app, six at most. Settings is an icon
+        // at the top right, under the network icon.
         int col = 0;
         boolean store = !apps.contains(PLAY_STORE) && launchIntent(pm, PLAY_STORE) != null;
         List<TvInputInfo> inputs = hdmiInputs();
@@ -436,21 +750,22 @@ public class MainActivity extends Activity {
             addTile(root, PLAY_STORE, "Play Store", null, LineIcon.PLAY, null, m + col++ * (w + g), bottomTop, w, h);
         for (TvInputInfo in : inputs)
             addTile(root, in.getId(), inputLabel(in), null, LineIcon.HDMI, null, m + col++ * (w + g), bottomTop, w, h);
-        addTile(root, SETTINGS, Strings.t("Settings"), null, LineIcon.SETTINGS, null, m + col++ * (w + g), bottomTop, w, h);
+        addTile(root, APP_LIST, "App list", null, LineIcon.GRID, null, m + col++ * (w + g), bottomTop, w, h);
         addTile(root, ADD, Strings.t("Add app"), null, LineIcon.PLUS, null, m + col * (w + g), bottomTop, w, h);
 
         // Plain icons at the top right, level with the date: any settings shortcuts picked, then the
         // network icon. Added last, so the first app keeps first focus; Up from the apps reaches them.
         List<Integer> quick = quickList();
         int ib = px(ICON_BUTTON), ig = px(ICON_GAP);
-        // The last icon's right edge lines up with the apps' (its focus circle sticks out past them).
-        int qx = getResources().getDisplayMetrics().widthPixels - m + (ib - px(ICON_SIZE)) / 2
+        // The last icon sits in the corner, ICON_EDGE from the right edge.
+        int qx = getResources().getDisplayMetrics().widthPixels - px(ICON_EDGE) + (ib - px(ICON_SIZE)) / 2
                 - (quick.size() + 1) * ib - quick.size() * ig;
         for (int q : quick) {
-            addIcon(QUICK + QUICK_NAMES[q], Strings.t(QUICK_LABELS[q]), new LineIcon(QUICK_ICONS[q]), qx);
+            addIcon(QUICK + QUICK_NAMES[q], Strings.t(QUICK_LABELS[q]), new LineIcon(QUICK_ICONS[q]), qx, px(ICON_TOP));
             qx += ib + ig;
         }
-        netIcon = addIcon(NETWORK, Strings.t("Network"), null, qx);
+        netIcon = addIcon(NETWORK, Strings.t("Network"), null, qx, px(ICON_TOP));
+        addIcon(SETTINGS, Strings.t("Settings"), new LineIcon(LineIcon.SETTINGS), qx, px(ICON_TOP + ICON_BUTTON + 4));
         netState = -1;
         refreshNetwork();
 
@@ -562,7 +877,7 @@ public class MainActivity extends Activity {
     }
 
     // An icon on its own, no tile or label: a glass circle shows behind it only while it's focused.
-    private ImageView addIcon(final String key, String label, Drawable icon, int x) {
+    private ImageView addIcon(final String key, String label, Drawable icon, int x, int y) {
         int b = px(ICON_BUTTON), size = px(ICON_SIZE);
         FrameLayout card = new FrameLayout(this);
         final GradientDrawable bg = new GradientDrawable();
@@ -584,7 +899,7 @@ public class MainActivity extends Activity {
         FrameLayout wrap = new FrameLayout(this);
         wrap.setClipChildren(false);
         wrap.addView(card, new FrameLayout.LayoutParams(b, b));
-        root.addView(wrap, at(x, px(ICON_TOP), b, b));
+        root.addView(wrap, at(x, y, b, b));
         tiles.add(card);
         return iv;
     }
@@ -593,6 +908,12 @@ public class MainActivity extends Activity {
         Intent i;
         if (ADD.equals(key)) {
             showAddMenu(-1);
+            return;
+        } else if (APP_LIST.equals(key)) {
+            showAppList();
+            return;
+        } else if (CastHook.RECEIVER.equals(key) && CastHook.isRunning()) {
+            CastHook.openReceiver(this); // port 5500 is the home screen's now; see CastHook
             return;
         } else if (SETTINGS.equals(key)) {
             dropdown(tile(SETTINGS), SETTINGS_ITEMS, which -> {
@@ -788,6 +1109,15 @@ public class MainActivity extends Activity {
     // with selected again, to put things back.
     private void panel(String title, final List<String> labels, final Icon icon, final int size,
                        final int selected, final Pick preview, final Pick pick) {
+        panel(title, labels, icon, size, selected, preview, pick, -1, null);
+    }
+
+    // divider (or -1): a labelled line just before that choice. It's a row of its own that focus skips,
+    // so choices keep their numbers: pick and preview still get the choice's index.
+    private void panel(String title, final List<String> labels, final Icon icon, final int size,
+                       final int selected, final Pick preview, final Pick pick,
+                       final int divider, final String dividerLabel) {
+        final boolean split = divider >= 0 && divider < labels.size();
         final Dialog d = new Dialog(this, android.R.style.Theme_Material_Dialog_NoActionBar);
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -811,10 +1141,16 @@ public class MainActivity extends Activity {
         // Icons load as rows appear, drawn small to save RAM.
         final Drawable[] icons = new Drawable[labels.size()];
         list.setAdapter(new BaseAdapter() {
-            @Override public int getCount() { return labels.size(); }
-            @Override public Object getItem(int pos) { return labels.get(pos); }
+            @Override public int getCount() { return labels.size() + (split ? 1 : 0); }
+            @Override public Object getItem(int pos) { return pos; }
             @Override public long getItemId(int pos) { return pos; }
-            @Override public View getView(int pos, View convert, ViewGroup parent) {
+            @Override public boolean areAllItemsEnabled() { return !split; }
+            @Override public boolean isEnabled(int pos) { return !(split && pos == divider); }
+            @Override public int getViewTypeCount() { return 2; }
+            @Override public int getItemViewType(int pos) { return split && pos == divider ? 1 : 0; }
+            @Override public View getView(int row, View convert, ViewGroup parent) {
+                if (split && row == divider) return convert != null ? convert : dividerRow(dividerLabel);
+                int pos = split && row > divider ? row - 1 : row;
                 TextView t = convert != null ? (TextView) convert : text(px(30), 0xE6FFFFFF, regular);
                 t.setText(labels.get(pos));
                 t.setSingleLine(true);
@@ -832,15 +1168,17 @@ public class MainActivity extends Activity {
                 return t;
             }
         });
-        list.setOnItemClickListener((parent, v, pos, id) -> {
+        list.setOnItemClickListener((parent, v, row, id) -> {
+            if (split && row == divider) return;
             d.dismiss();
-            pick.at(pos);
+            pick.at(split && row > divider ? row - 1 : row);
         });
         if (preview != null) {
-            list.setSelection(selected);
+            list.setSelection(split && selected >= divider ? selected + 1 : selected);
             list.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
-                @Override public void onItemSelected(android.widget.AdapterView<?> p, View v, int pos, long id) {
-                    preview.at(pos);
+                @Override public void onItemSelected(android.widget.AdapterView<?> p, View v, int row, long id) {
+                    if (split && row == divider) return;
+                    preview.at(split && row > divider ? row - 1 : row);
                 }
                 @Override public void onNothingSelected(android.widget.AdapterView<?> p) {}
             });
@@ -857,6 +1195,22 @@ public class MainActivity extends Activity {
         w.setGravity(Gravity.END);
         w.setDimAmount(preview != null ? 0f : 0.5f); // a preview needs the home screen undimmed
         d.show();
+    }
+
+    // A heading in the list: small spaced capitals, then a line in the page's two accent colours.
+    private View dividerRow(String label) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(px(24), px(28), px(24), px(14));
+        TextView t = text(px(20), 0xCCFFFFFF, semibold);
+        t.setText(label);
+        t.setLetterSpacing(0.2f);
+        row.addView(t, new LinearLayout.LayoutParams(-2, -2));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, Math.max(2, px(3)), 1f);
+        lp.leftMargin = px(18);
+        row.addView(hairline(new int[] {HERE, KOREA}), lp);
+        return row;
     }
 
     // A small menu that drops down under a tile, in the same glass as the tiles. Opens above the
@@ -904,14 +1258,15 @@ public class MainActivity extends Activity {
         int tileBottom = at[1] + Math.round(anchor.getHeight() * anchor.getScaleY());
         int w = Math.max(Math.max(Math.round(anchor.getWidth() * anchor.getScaleX()), px(320)), (int) Math.ceil(widest));
         int h = items.length * rowH + 2 * pad;
-        int y = tileBottom + px(64);
+        int y = tileBottom + (anchor.getHeight() < px(ICON_BUTTON + 1) ? px(12) : px(64)); // icons have no name below
         if (y + h > getResources().getDisplayMetrics().heightPixels - px(24)) y = at[1] - h - px(16);
         Window win = d.getWindow();
         win.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
         win.clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
         win.setGravity(Gravity.TOP | Gravity.START);
         android.view.WindowManager.LayoutParams lp = win.getAttributes();
-        lp.x = at[0];
+        // A small anchor at the right edge (the Settings icon) opens the menu leftwards, so it stays on screen.
+        lp.x = Math.min(at[0], getResources().getDisplayMetrics().widthPixels - w - px(24));
         lp.y = y;
         lp.width = w;
         lp.height = h;
@@ -976,6 +1331,36 @@ public class MainActivity extends Activity {
             buildTiles();
         });
     }
+
+    // Every app on the TV that can be opened, by name. The ones already on the home screen come last
+    // (by name too), since they're a click away already. Picking one opens it; nothing is added.
+    private void showAppList() {
+        final PackageManager pm = getPackageManager();
+        TreeMap<String, String> others = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        TreeMap<String, String> onHome = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        for (String category : new String[] {Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER}) {
+            Intent q = new Intent(Intent.ACTION_MAIN).addCategory(category);
+            for (ResolveInfo ri : pm.queryIntentActivities(q, 0)) {
+                String p = ri.activityInfo.packageName;
+                if (others.containsValue(p) || onHome.containsValue(p) || p.equals(getPackageName())
+                        || LAUNCHERS.contains(p)) continue;
+                TreeMap<String, String> into = rowApps.contains(p) ? onHome : others;
+                String label = labelOf(p);
+                if (!into.containsKey(label)) into.put(label, p);
+            }
+        }
+        final List<String> pkgs = new ArrayList<>(others.values());
+        pkgs.addAll(onHome.values());
+        List<String> labels = new ArrayList<>(others.keySet());
+        labels.addAll(onHome.keySet());
+        panel("All apps  ·  " + pkgs.size(), labels,
+                pos -> fit(pm.getApplicationIcon(pkgs.get(pos)), px(48), px(48)), px(48), -1, null,
+                which -> open(pkgs.get(which)), onHome.isEmpty() ? -1 : others.size(), "ON YOUR HOME SCREEN");
+    }
+
+    // Other home screens: not apps to open from the list.
+    private static final List<String> LAUNCHERS = Arrays.asList("com.google.android.tvlauncher",
+            "com.google.android.apps.tv.launcherx", "com.google.android.leanbacklauncher", "com.ansub.tvhome");
 
     private String labelOf(String pkg) {
         PackageManager pm = getPackageManager();

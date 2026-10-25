@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 [ -n "$JAVA_HOME" ] && export PATH="$JAVA_HOME/bin:$PATH"
 SDK=${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}
 [ -n "$SDK" ] || for d in /opt/homebrew/share/android-commandlinetools "$HOME/Library/Android/sdk" "$HOME/Android/Sdk"; do [ -d "$d" ] && SDK=$d && break; done
-BT=$SDK/build-tools/34.0.0; JAR=$SDK/platforms/android-34/android.jar
+BT=$SDK/build-tools/${BUILD_TOOLS:-34.0.0}; JAR=$SDK/platforms/${PLATFORM:-android-34}/android.jar
 [ -f "$JAR" ] && [ -d "$BT" ] || { echo "Android SDK not found. Set ANDROID_HOME, and install platforms;android-34 and build-tools;34.0.0." >&2; exit 1; }
 
 rm -rf out; mkdir -p out/classes out/dex out/gen/com/ansub/tvhome
