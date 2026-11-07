@@ -15,12 +15,17 @@ Claude Code or Codex does the work. You just press OK on the remote.
 
 **As seen on**
 
-[![The Verge](https://img.shields.io/badge/The_Verge-5200FF?style=for-the-badge)](https://www.theverge.com/ai-artificial-intelligence/1013505/maybe-claude-make-your-android-tv-less-crappy-too)
+[![The Verge](https://img.shields.io/badge/The_Verge-5200FF?style=for-the-badge)](https://www.theverge.com/tech/1016116/vibe-coding-tv-os)
 [![Android Authority](https://img.shields.io/badge/Android_Authority-3DDC84?style=for-the-badge&logo=android&logoColor=white)](https://www.androidauthority.com/android-tv-vibe-hacking-remove-ads-bloatware-3725338/)
 [![Mashable](https://img.shields.io/badge/Mashable-00AEEF?style=for-the-badge)](https://mashable.com/tech/smart-tv-ads-claude-code-ai-cleanup)
 [![t3n](https://img.shields.io/badge/t3n-E6007E?style=for-the-badge)](https://t3n.de/news/claude-alter-fernseher-android-tv-1768831/)
 [![Tom's Guide](https://img.shields.io/badge/Tom's_Guide-E1261C?style=for-the-badge)](https://www.tomsguide.com/ai/people-are-using-ai-to-turn-their-smart-tvs-into-dumb-tvs-and-you-might-want-to-do-the-same)
 [![Yahoo Tech](https://img.shields.io/badge/Yahoo_Tech-6001D2?style=for-the-badge)](https://tech.yahoo.com/ai/article/sick-of-seeing-ads-and-clutter-on-your-smart-tv-the-internet-says-ai-can-fix-that-181417392.html)
+[![GIGA](https://img.shields.io/badge/GIGA-E2001A?style=for-the-badge)](https://www.giga.de/tech/ist-euer-smart-tv-zu-langsam-dieses-ki-tool-kann-helfen--01M5HH1C89TWAQX4FYXJBDBQAF)
+[![Computer Hoy](https://img.shields.io/badge/Computer_Hoy-0A64A0?style=for-the-badge)](https://computerhoy.20minutos.es/dispositivos/tv-detox-app-gratis-elimina-obsolescencia-programada-tu-smart-tv-claude-hace-trabajo-tu-solo-tienes-que-pulsar-ok-mando-distancia_7050469_0.html)
+[![AI Times](https://img.shields.io/badge/AI_Times-111111?style=for-the-badge)](https://www.aitimes.com/news/articleView.html?idxno=216547)
+
+[All press coverage →](press.md)
 
 <img src="docs/home-screen.png" alt="The TV Detox home screen" width="100%">
 
@@ -177,6 +182,46 @@ The cleanup works, but **leave Google TV's own home screen on**, which means you
 
 - Connect with Wireless debugging (see "How do I turn on developer mode?" above). The plain `install.sh <TV_IP>` won't reach a Chromecast.
 - The YouTube button on the remote can stop working, and some lose casting. Tell Claude to keep casting on if you use it.
+- To make Home open this home screen anyway, turn on **Settings > Accessibility > Home button**. Google TV's home screen stays on: when it opens, this one opens over it. Hold Back on this home screen to go to Google TV's, which then stays until you open "Home" from its apps row or restart the TV.
+- On Android 13+, a sideloaded app may first need **App info > ⋮ > Allow restricted settings** before the toggle works. Play Protect may warn about the app because it has an accessibility service.
+- If this home screen repeatedly fails to open, redirects stop. Open its "Home" tile to try again. To recover at any time, turn off **Home button** in Accessibility, or uninstall this app.
+
+If the Accessibility screen freezes, this adb alternative adds our service while keeping TalkBack and any other enabled services (run from a Mac/Linux terminal):
+
+```sh
+adb shell '
+service=com.ansub.tvhome/.HomeButton
+services=$(settings get secure enabled_accessibility_services)
+case "$services" in null|"") services="" ;; esac
+case ":$services:" in
+  *":$service:"*|*":com.ansub.tvhome/com.ansub.tvhome.HomeButton:"*) ;;
+  *) services="${services:+$services:}$service" ;;
+esac
+settings put secure enabled_accessibility_services "$services"
+settings put secure accessibility_enabled 1
+'
+```
+
+To remove only our service with adb, leaving the others enabled:
+
+```sh
+adb shell '
+services=$(settings get secure enabled_accessibility_services)
+keep=""
+IFS=:
+for service in $services; do
+  case "$service" in
+    ""|null|com.ansub.tvhome/.HomeButton|com.ansub.tvhome/com.ansub.tvhome.HomeButton) ;;
+    *) keep="${keep:+$keep:}$service" ;;
+  esac
+done
+if [ -n "$keep" ]; then
+  settings put secure enabled_accessibility_services "$keep"
+else
+  settings delete secure enabled_accessibility_services
+fi
+'
+```
 
 </details>
 
@@ -194,6 +239,23 @@ adb shell pm enable com.google.android.apps.tv.launcherx
 ```
 
 If the TV ever asks to be set up again, or a setup screen won't finish, turn the setup app back on first.
+
+</details>
+
+<details>
+<summary><b>Philips Android TV: Home still opens the old screen</b></summary>
+<br>
+
+On Philips Android TVs such as the 43PUS8535, Home may go through `org.droidtv.homeintentresolver`. Keep the router and remote/system services on. `install.sh` opens Settings, confirms it left the new home screen, then presses Home to test the router before keeping stock launchers off. If verification fails, it restores what it disabled. Restart once to check the new home screen opens at boot; otherwise run `undo.sh` over USB or port 5555.
+
+Plain `check.sh` only reads state; `check.sh <TV_IP> --fix` may open Settings and press Home to test routing. If Home still opens the old screen, send the install output, firmware/Android version, and these results:
+
+```sh
+adb shell cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.HOME
+adb shell cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME
+adb shell input keyevent KEYCODE_HOME
+adb shell dumpsys window | grep mCurrentFocus
+```
 
 </details>
 
@@ -235,12 +297,13 @@ Tested on a TCL Smart TV Pro (Google TV, Android 14, 2.3 GB of RAM). Every step 
 **Keep these on:**
 
 - `com.tcl.tvinput`: the HDMI inputs and the tuner.
+- `com.tcl.tv`: Live TV, which is also the screen that shows HDMI. Turning it off breaks every HDMI input, even if you never watch antenna or cable TV.
 - `com.tcl.suspension`: the input picker.
 - `com.tcl.inputmethod.international`: the TCL keyboard.
 - `com.tcl.providers.config`: other TCL apps read their settings from it.
 - `com.tcl.useragreement`: TCL's privacy switches.
 
-`com.tcl.tv` is Live TV, the channel guide and channel scanning. Turn it off only if you never watch antenna or cable TV.
+**HDMI stopped working?** If the TV sees the device but won't switch to it, `com.tcl.tv` is probably off. `com.tcl.tvinput` only provides the signal; `com.tcl.tv`'s player is the only screen that shows it. Bring it back with `adb shell cmd package install-existing com.tcl.tv` (or `adb shell pm enable com.tcl.tv` if it was turned off rather than removed).
 
 **Optional: the phone keyboard keeps popping up.** On this TV, Google TV's phone-remote service made its phone keyboard the TV's keyboard again after every restart. If that happens to you, first note which keyboard you have now:
 
@@ -263,6 +326,66 @@ adb shell ime set <the keyboard you noted>
 ```
 
 **The TCL logo at startup** is part of the TV's firmware, so it can't be turned off. On this TV, turning it off with the remote (not at the wall) let TCL's quick start wake it straight to the home screen, with no logo.
+
+**TCL Q651G (Google TV, Android 12).** Also tested on two TCL Q651G TVs (43" and 50", 1.8 GB of RAM) with `GOOGLE_TV=1 YES_SETUP=1` on port 5555. Both started normally after every restart, and free memory went from about 560 MB to about 840 MB. A few notes for these TVs:
+
+- **Keep `com.tcl.tv` on**, same as above. It's the only app that shows HDMI on these TVs too.
+- **Wi-Fi was forgotten.** On both TVs, the TV forgot its Wi-Fi network partway through `install.sh`, which also ended the adb connection. The likely cause: Android erases the networks an app saved when that app is turned off, and Google TV's setup app had saved it (see [rule 5](docs/debloat.md#5-never-turn-off-the-app-that-saved-your-wi-fi)). `install.sh` now checks this and leaves the setup app on. To get past it, forget the network on the TV, join it again, and run `install.sh` again. If your TV has an Ethernet port, a cable avoids this.
+- **Optional: Usage & diagnostics** (Settings > Privacy) is part of the setup app, so it won't open once that app is off. Only on these TVs, after `install.sh` turned the setup app off: connect on port 5555 (not Wireless debugging), then turn the setup app on for a moment. While it's on, don't press Home, because Home opens the setup app.
+
+  ```sh
+  adb shell pm enable com.google.android.tungsten.setupwraith
+  adb shell am start -a com.google.android.settings.USAGE_AND_DIAGNOSTICS_SETTING
+  # switch it off on the TV, press Back, then:
+  adb shell pm disable-user --user 0 com.google.android.tungsten.setupwraith
+  adb shell cmd role add-role-holder --user 0 android.app.role.HOME com.ansub.tvhome
+  adb shell cmd package set-home-activity com.ansub.tvhome/.MainActivity
+  ```
+
+- **The app buttons on the remote** (YouTube, Netflix and others) stopped working, even for apps that are still installed. TCL sends these buttons through one of its own apps first. We haven't confirmed which one. If you need them, try turning `com.tcl.partnercustomizer` back on, then `com.tcl.ttvs`, with `adb shell pm enable <package>`.
+- **No TCL keyboard.** `com.tcl.inputmethod.international` isn't on these TVs, so Gboard is the only keyboard: keep it on. Skip the optional keyboard step above, or set Gboard instead (find its name with `adb shell ime list -s`).
+- **Also turned off without trouble:** TCL TV+ (`com.tcl.tv.plus`, free channels with ads), Samba TV (`tv.samba.ssm.ui`, which recognises what's on screen for ads), `com.tcl.tv.tclhome_passive`, `com.tcl.smartlink.core` and `com.tcl.hotelmenu`. AirPlay (`com.tcl.airplay2`, `com.realtek.airplay2`) can be turned off too if you don't use it.
+
+**TCL 32S4K (Google TV, Android 14, MediaTek MT5867, 954 MB of RAM).** Tested with `GOOGLE_TV=1 YES_SETUP=1` on port 5555, with a restart after every batch. It started normally each time. Measured 4 minutes after a restart, compressed swap in use went from 216 MB to 132 MB and free memory from 380 MB to 419 MB, and the home screen went from 84 MB to 25 MB. Storage went from 1.41 GB to 1.95 GB free. The swap is what you feel on a TV this small: its storage writes at under 10 MB/s.
+
+- **This TV is MediaTek inside, not TCL's usual platform.** There's no `com.tcl.tv` or `com.tcl.tvinput`. HDMI goes through `com.mediatek.wwtv.tvcenter` and `com.mediatek.tvinput`, and the remote's keys through `com.mediatek.tv.service` (check with `adb shell dumpsys window policy`). Keep all three on.
+- **The setup app owned the Wi-Fi.** All saved networks had `cname=com.google.android.tungsten.setupwraith`. We forgot the network on the TV and joined it again before `install.sh`, and Wi-Fi then survived the setup app going off.
+- **Turned off without trouble:** TCL's analytics (`com.tcl.ttvs`, about 26 MB), `com.tcl.partnercustomizer`, `com.tcl.keyhelp`, `com.tcl.messagebox`, `com.tcl.logkit`, `com.tcl.browser`, two store demos (`fusion.android.tv.demo`, `com.mediatek.MtkDemo`) and Google's partner app installer (`android.autoinstalls.config.google.gtvpai`). Every remote button still worked, because on this TV they don't go through TCL's apps.
+- **Also off, because the owner didn't use them:** voice search (`com.google.android.katniss`, about 54 MB), casting, the phone remote and Google TV's screensaver. Each one is worth it on 1 GB of RAM if you can do without the feature.
+- Animations were already off, and the main apps were already compiled (`pm art dump <package>`), so neither helps here.
+
+</details>
+
+<details>
+<summary><b>OnePlus TVs: what worked, and what to keep</b></summary>
+<br>
+
+Tested on a OnePlus TV E00 (QLED, Android TV 11 with Google TV's home screen, 2.9 GB of RAM). The cleanup was followed by a restart, and the TV started normally and opened this home screen by itself. Free memory went from about 1.34 GB to about 1.67 GB, though part of that is just from restarting.
+
+**Home screen.** OnePlus ships two home screens: OxygenPlay (`com.oneplus.tv.launcher`) and Google TV's (`com.google.android.apps.tv.launcherx`). Turning off Google TV's is up to you and at your own risk: it worked on this TV, but it has left some Google TVs (like Chromecast) stuck restarting. Only try it if you can reconnect over USB or port 5555. If you leave it on, the cleanup still works and Home keeps opening Google TV's home screen. If you do turn it off and Home opens Google TV's setup app, run `install.sh` again with `GOOGLE_TV=1 YES_SETUP=1`, the same fix as on the TCL above.
+
+**Safe to turn off**, if you don't use them:
+
+| App | Package |
+|---|---|
+| OxygenPlay home screen | `com.oneplus.tv.launcher` |
+| OnePlus message board and promos | `com.heytap.tv.msgboard` |
+| Store demo | `fusion.android.tv.demo` |
+| User guide | `com.oneplus.tv.userguide` |
+| Weather | `net.oneplus.weather` |
+| ColorOS Relax | `com.coloros.relax.tv` |
+| Screen mirroring (Miracast) | `com.heytap.optvmiracastservice` |
+| OnePlus phone link | `com.heytap.olink`, `com.heytap.ars.sink` |
+| Bluetooth speaker mode | `com.heytap.tv.btspeaker` |
+| Camera | `com.heytap.tv.camera` |
+| AirScreen | `com.ionitech.airscreen` |
+
+**Keep these on:**
+
+- `com.heytap.tv.livetv`: Live TV, which also opens the HDMI input list. Turning it off can stop you switching inputs.
+- `com.mediatek.*`, `com.oneplus.tv.factory`, `com.oneplus.tv.remote`: the remote's buttons, the input key, the tuner and HDMI.
+
+**Remote buttons.** If you turned Google TV's home screen off, the **Guide** and **All apps** keys do nothing, because they open it. That's expected.
 
 </details>
 
@@ -304,7 +427,15 @@ Yes. Leave out step 5 of the prompt ("Install the home screen"). Your TV looks t
 <summary><b>How do I know which apps are safe to turn off?</b></summary>
 <br>
 
-Run the planner. It reads the TV and prints every app with a verdict, changing nothing:
+First, optionally, check the TV itself:
+
+```sh
+sh supports.sh <TV_IP>
+```
+
+It prints what the TV is (make, model, Android version, RAM), which home screens can take over, how many apps are already turned off, and whether swapping the home screen is a good idea on that set. It changes nothing.
+
+Then run the planner. It reads the TV and prints every app with a verdict, changing nothing:
 
 ```sh
 sh candidates.sh <TV_IP>
@@ -386,6 +517,8 @@ Use the remote. Hold **OK** on an app (or press **Menu**) to:
 
 To add an app, pick the **Add app** tile in the bottom row. Add as many apps as you like: they wrap into rows of six, and the page scrolls once there are more than twelve. Your changes are kept until you run `install.sh` with a new app list.
 
+HDMI tiles work the same way. Hold **OK** on one to **Rename** it — TV, PlayStation, Xbox, Switch, Laptop, PC, Blu-ray, Soundbar — or choose **Type a name…** to enter your own with the TV’s keyboard. You can also **Remove** it from the home screen. A removed input comes back by holding **OK** on the **Add app** tile. This only changes this home screen; the TV's own input names stay as they are.
+
 </details>
 
 <details>
@@ -463,6 +596,8 @@ If the laptop never connects, use the TV's recovery mode or a factory reset. How
    ```
 3. `sh build.sh`, then `sh install.sh <TV_IP>` installs your build instead of the release.
 4. `sh ci/smoke-test.sh <TV_IP or emulator>` checks it all works.
+5. `CLOCK=24 sh install.sh <TV_IP>` sets a 24-hour clock (or `CLOCK=12` for a 12-hour one, `CLOCK=auto` to follow the TV again). On the TV, holding OK on an HDMI tile renames or removes that input.
+6. Testing the input tiles on an emulator, which has no HDMI ports: `FAKE_INPUT=1 sh install.sh <emulator>`. That builds and installs `ci/fake-input` (a TV input service with no hardware behind it) and tells the home screen to show it. `undo.sh` removes it again. It is for emulators only.
 
 HDMI inputs are found on their own. The labels follow the TV's language, with 16 languages built in. To add yours or fix a translation, edit `src/com/ansub/tvhome/Strings.java`. Keep `key.jks`, which is made on your first build: updates must be signed with the same key.
 

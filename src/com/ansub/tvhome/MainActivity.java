@@ -1,6 +1,10 @@
 package com.ansub.tvhome;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Dialog;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -32,6 +36,8 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.text.InputFilter;
+import android.text.InputType;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -39,7 +45,13 @@ import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.Window;
+import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
+import android.view.animation.DecelerateInterpolator;
+import android.view.animation.Interpolator;
 import android.widget.BaseAdapter;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -52,8 +64,14 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.List;
+import java.util.WeakHashMap;
 
 public class MainActivity extends Activity {
 
@@ -87,11 +105,25 @@ public class MainActivity extends Activity {
     private static final int[][] QUICK_ICONS = {LineIcon.BLUETOOTH, LineIcon.SOUND, LineIcon.PICTURE};
     private static final String NETWORK = "network";
     private static final int OFFLINE = 0, ETHERNET = 4; // network states; 1 to 3 are Wi-Fi bars
+
+    // Saved on the TV: custom input names ("id=name" per line), hidden inputs (one id per line),
+    // and the clock override ("12" or "24"; absent follows the TV).
+    private static final String PREF_INPUT_NAMES = "inputnames", PREF_HIDDEN_INPUTS = "hiddeninputs";
+    private static final String PREF_CLOCK = "clock", PREF_FAKE_INPUTS = "fakeinputs";
+    // The throwaway input install.sh adds with FAKE_INPUT=1. It has no HDMI port behind it; it is
+    // there so an emulator, which has no inputs of its own, still has a tile to test with.
+    private static final String FAKE_INPUT_PKG = "com.ansub.fakeinput";
+    // Names an input can be given with the remote alone: no keyboard, no typing.
+    private static final String[] INPUT_PRESETS = {"TV", "PlayStation", "Xbox", "Switch", "Laptop", "PC", "Blu-ray", "Soundbar"};
     // TCL keeps its own Picture and Sound panels in a service; Android's Sound page is missing there.
     private static final String TCL_SHOW_WINDOW = "com.tcl.settings.SHOW_WINDOW";
 
     // Layout is designed at 1920x1080 and scaled to the TV's real UI size by px().
-    private static final int MARGIN = 96, GAP = 36, RADIUS = 22;
+    private static final int MARGIN = 96, GAP = 36, RADIUS = 22; // Home+ keeps 22 (upstream rounded to 26)
+    // The focus lift: the tile grows, rises, brightens and rounds off a little, then settles.
+    // Long enough to read as motion, short enough that a run of d-pad presses never feels behind.
+    private static final int FOCUS_MS = 180, RADIUS_UP = 10;
+    private static final Interpolator FOCUS_EASE = new DecelerateInterpolator(1.8f);
     private static final int ROW1_TOP = 604, ROW_STEP = 224;
     private static final int GRID_MIN_TOP = 400; // more rows push the grid up, but not into the clock
     // Tucked into the top right corner, clear of South Korea's clock.
@@ -135,6 +167,7 @@ public class MainActivity extends Activity {
     private FrameLayout root; // the page, inside a vertical scroller
     private int tileW, tileH, gridTop; // app grid geometry, set by buildTiles
     private final List<View> tiles = new ArrayList<>();
+    private final Map<View, ValueAnimator> lifts = new WeakHashMap<>(); // a running focus fade per tile
     private boolean dirty = true;
     private java.util.Locale shownLocale; // the TV's language (and region) when the page was built
     private String focusedKey;
@@ -142,6 +175,7 @@ public class MainActivity extends Activity {
     private String movingKey;   // the app being moved with left/right, if any
     private TextView moveHint;  // shown above the apps while moving
     private boolean longPressed; // OK was held: swallow the key-up so the app doesn't open
+    private boolean backHeld; // Back was held and opened Google TV's home screen: swallow the key-up
     // The tile OK went down on. An app that closes on OK's key-down (Netflix's "Exit") hands the matching
     // key-up to the tile still focused here, so a key-up only opens the app it went down on (#30).
     private String okDownKey;
@@ -258,14 +292,17 @@ public class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        // A clock change, new weather places or a new clock label need the whole page rebuilt; a new app
+        // list only needs the tiles.
+        boolean clock = intent != null && intent.hasExtra("clock");
         if (saveConfig(intent)) {
-            if (placesChanged) recreate(); // clock label or weather places: start over with them
+            if (clock || placesChanged) recreate();
             else buildTiles();
         }
     }
 
-    // Saves an app list passed with --es apps "..." and shortcuts passed with --es quick "...".
-    // Returns true if it changed.
+    // Saves an app list passed with --es apps "...", shortcuts passed with --es quick "...", and a
+    // clock override passed with --es clock 12|24|auto. Returns true if it changed.
     // When Android kills the home screen in the background, it can start it again with the same old
     // intent; the stamp install.sh sends stops that from undoing changes made on the TV since.
     // Also --es weather "Name,lat,lon;Name,lat,lon" (see Weather) and --es here "LABEL" for the TV's
@@ -277,8 +314,11 @@ public class MainActivity extends Activity {
         String quick = intent == null ? null : intent.getStringExtra("quick");
         String weather = intent == null ? null : intent.getStringExtra("weather");
         String here = intent == null ? null : intent.getStringExtra("here");
+        String clock = intent == null ? null : intent.getStringExtra("clock");
+        String fake = intent == null ? null : intent.getStringExtra("fakeinputs");
         placesChanged = false;
-        if (apps == null && quick == null && weather == null && here == null) return false;
+        if (apps == null && quick == null && weather == null && here == null && clock == null && fake == null)
+            return false;
         SharedPreferences prefs = getSharedPreferences(PREFS, 0);
         String stamp = intent.getStringExtra("stamp");
         if (stamp != null && stamp.equals(prefs.getString("stamp", null))) return false;
@@ -302,6 +342,25 @@ public class MainActivity extends Activity {
         if (here != null) {
             e.putString("here", here.trim());
             placesChanged = true;
+        }
+        if (clock != null) {
+            clock = clock.trim();
+            if (clock.isEmpty() || clock.equalsIgnoreCase("auto")) e.remove(PREF_CLOCK);
+            else e.putString(PREF_CLOCK, clock);
+        }
+        // Set only by install.sh's FAKE_INPUT=1, which also installs the throwaway input itself.
+        // It is for an emulator, which has no HDMI ports, and never for a real TV.
+        if (fake != null) {
+            if (fake.trim().equals("1")) {
+                e.putString(PREF_FAKE_INPUTS, "1");
+                // An input taken off the home screen stays off, even when FAKE_INPUT=1 adds it back
+                // (undo.sh uninstalls it, but running install.sh again does not). Left alone, the
+                // emulator would come back with no input tile at all, so put the test input back.
+                Set<String> hidden = hiddenInputs();
+                for (java.util.Iterator<String> it = hidden.iterator(); it.hasNext(); )
+                    if (it.next().startsWith(FAKE_INPUT_PKG + "/")) it.remove();
+                e.putString(PREF_HIDDEN_INPUTS, android.text.TextUtils.join("\n", new TreeSet<>(hidden)));
+            } else e.remove(PREF_FAKE_INPUTS);
         }
         e.apply();
         dirty = true;
@@ -346,13 +405,22 @@ public class MainActivity extends Activity {
         refreshTimeGap();
         View f = getCurrentFocus();
         if (f == null && !tiles.isEmpty()) tiles.get(0).requestFocus();
+        HomeButton.onHomeResumed(this); // back on this home screen: Home comes here again
+        // Only counted as opened once it has stayed up a moment, so a crash right after opening still
+        // counts as a failed launch.
+        getWindow().getDecorView().postDelayed(homeOk, 1500);
     }
+
+    private final Runnable homeOk = () -> HomeButton.onHomeOk(this);
 
     @Override
     protected void onPause() {
         handler.removeCallbacks(weatherTick);
         handler.removeCallbacks(clockTick);
         super.onPause();
+        // Left normally (an app or Settings opened), so it didn't crash.
+        getWindow().getDecorView().removeCallbacks(homeOk);
+        HomeButton.onHomeOk(this);
     }
 
     // One clock: a glowing dot and the place in spaced capitals, the date, then the time with a small
@@ -389,8 +457,11 @@ public class MainActivity extends Activity {
         } else {
             String day = Strings.datePattern();
             date = clock(day, day, px(30), 0xA8FFFFFF, regular);
-            time = clock("h:mm", "H:mm", px(176), Color.WHITE, semibold);
-            ampm = clock("a", "", px(44), accent, semibold);
+            // The clock follows the TV unless --es clock 12 or 24 says otherwise.
+            String clockPref = getSharedPreferences(PREFS, 0).getString(PREF_CLOCK, null);
+            boolean force24 = "24".equals(clockPref), force12 = "12".equals(clockPref);
+            time = clock(force24 ? "H:mm" : "h:mm", force12 ? "h:mm" : "H:mm", px(176), Color.WHITE, semibold);
+            ampm = clock(force24 ? "" : "a", force12 ? "a" : "", px(44), accent, semibold);
         }
         // A fixed height, so the Korean and English dates take the same room and the two sides line up.
         date.setIncludeFontPadding(false);
@@ -434,7 +505,9 @@ public class MainActivity extends Activity {
 
     private void refreshKoreanClocks() {
         java.util.Date now = new java.util.Date();
-        boolean h24 = android.text.format.DateFormat.is24HourFormat(this);
+        String clockPref = getSharedPreferences(PREFS, 0).getString(PREF_CLOCK, null);
+        boolean h24 = "24".equals(clockPref) || (!"12".equals(clockPref)
+                && android.text.format.DateFormat.is24HourFormat(this));
         for (TextView[] c : koreanClocks) {
             c[0].setText(korean("M월 d일 EEEE", now));
             c[1].setText(korean(h24 ? "H:mm" : "h:mm", now));
@@ -632,14 +705,57 @@ public class MainActivity extends Activity {
     @Override
     public void onBackPressed() { /* home screen: nothing to go back to */ }
 
-    // Static gradient, drawn once by the window: no extra view, no animation.
+    // Holding Back opens Google TV's own home screen, where it stays on (see HomeButton). Spotted on a
+    // key repeat, or when Back is let go if the remote sends none.
+    @Override
+    public boolean onKeyLongPress(int code, KeyEvent ev) {
+        if (code == KeyEvent.KEYCODE_BACK && HomeButton.openGoogleTv(this)) {
+            backHeld = true;
+            return true;
+        }
+        return super.onKeyLongPress(code, ev);
+    }
+
+    @Override
+    public boolean onKeyUp(int code, KeyEvent ev) {
+        if (code == KeyEvent.KEYCODE_BACK) {
+            boolean held = backHeld;
+            backHeld = false;
+            if (held) return true;
+            if (ev.isTracking() && !ev.isCanceled()
+                    && ev.getEventTime() - ev.getDownTime() >= ViewConfiguration.getLongPressTimeout()
+                    && HomeButton.openGoogleTv(this)) return true;
+        }
+        return super.onKeyUp(code, ev);
+    }
+
+    // Static gradient, drawn by the window: no extra view, no animation. It's painted once into a
+    // screen-sized picture: as three gradients, low-end GPUs paint it again on every frame of a focus
+    // move, and those frames take two to six times as long (#69). On Android 8+ the picture moves to
+    // the GPU, so the home screen uses no more memory than before; if anything fails, the gradients stay.
     private Drawable background(int[] c) {
         GradientDrawable base = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                 new int[] {c[0], c[1], c[2]});
         GradientDrawable top = radial(c[3], 0.08f, -0.12f, px(1250));
         GradientDrawable bottom = radial(c[4], 1.0f, 1.1f, px(1000));
         for (GradientDrawable g : new GradientDrawable[] {base, top, bottom}) g.setDither(true);
-        return new LayerDrawable(new Drawable[] {base, top, bottom});
+        Drawable layers = new LayerDrawable(new Drawable[] {base, top, bottom});
+        int w = getResources().getDisplayMetrics().widthPixels, h = getResources().getDisplayMetrics().heightPixels;
+        try {
+            Bitmap bm = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            layers.setBounds(0, 0, w, h);
+            layers.draw(new Canvas(bm));
+            if (android.os.Build.VERSION.SDK_INT >= 26) {
+                Bitmap hw = bm.copy(Bitmap.Config.HARDWARE, false);
+                if (hw != null) {
+                    bm.recycle();
+                    bm = hw;
+                }
+            }
+            return new BitmapDrawable(getResources(), bm);
+        } catch (Throwable t) {
+            return layers;
+        }
     }
 
     // The saved wallpaper, as an index into WALLPAPERS (Dusk if none is saved).
@@ -827,21 +943,35 @@ public class MainActivity extends Activity {
         final boolean glass = banner == null;
         card.setOnFocusChangeListener((v, has) -> {
             if (has) focusedKey = key;
-            if (glass) bg.setColor(has ? 0x38FFFFFF : 0x13FFFFFF);
-            v.animate().scaleX(has ? 1.1f : 1f).scaleY(has ? 1.1f : 1f).translationZ(has ? px(26) : 0)
-                    .setDuration(140).withLayer().start();
-            if (caption != null) caption.setVisibility(has ? View.VISIBLE : View.INVISIBLE);
+            lift(v, bg, has, glass ? 0x13FFFFFF : 0xFF1E1A1C, glass ? 0x38FFFFFF : 0xFF1E1A1C,
+                    px(RADIUS), px(RADIUS + RADIUS_UP));
+            if (caption != null) {
+                caption.animate().cancel();
+                if (has) {
+                    caption.setVisibility(View.VISIBLE);
+                    caption.setAlpha(0f);
+                    caption.animate().alpha(1f).setDuration(FOCUS_MS).setInterpolator(FOCUS_EASE).start();
+                } else {
+                    caption.animate().alpha(0f).setDuration(FOCUS_MS / 2).withEndAction(
+                            () -> caption.setVisibility(View.INVISIBLE)).start();
+                }
+            }
         });
         final boolean editable = rowApps.contains(key);
         card.setOnClickListener(v -> open(key));
         if (editable) card.setOnLongClickListener(v -> { showEditMenu(key); return true; });
+        // What a long OK (or Menu) on this tile opens: the app row's menu, an input's menu, or, on
+        // the + tile, the inputs taken off the home screen.
+        final Runnable menu = editable ? () -> showEditMenu(key)
+                : isInput(key) ? () -> showInputMenu(key)
+                : ADD.equals(key) && !hiddenInputs().isEmpty() ? this::showHiddenInputs : null;
         card.setOnKeyListener((v, code, ev) -> {
             boolean ok = code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER
                     || code == KeyEvent.KEYCODE_NUMPAD_ENTER;
             boolean down = ev.getAction() == KeyEvent.ACTION_DOWN;
             if (key.equals(movingKey)) return moveKey(key, code, ok, down);
-            if (editable && code == KeyEvent.KEYCODE_MENU) {
-                if (!down) showEditMenu(key);
+            if (menu != null && code == KeyEvent.KEYCODE_MENU) {
+                if (!down) menu.run();
                 return true;
             }
             if (!ok) return false;
@@ -849,10 +979,10 @@ public class MainActivity extends Activity {
                 if (ev.getRepeatCount() == 0) {
                     longPressed = false;
                     okDownKey = key;
-                } else if (editable && !longPressed && (ev.isLongPress()
+                } else if (menu != null && !longPressed && (ev.isLongPress()
                         || ev.getEventTime() - ev.getDownTime() >= ViewConfiguration.getLongPressTimeout())) {
                     longPressed = true;
-                    showEditMenu(key);
+                    menu.run();
                 }
             } else {
                 // Only the key-up of an OK that went down on this tile opens the app, and not a cancelled
@@ -876,6 +1006,53 @@ public class MainActivity extends Activity {
         tiles.add(card);
     }
 
+    // The focus lift: the view grows and rises while its background fades and rounds off. A new
+    // change cancels the fade the view was running, so a fast run of d-pad presses only ever shows
+    // the tile in front and the one it just left mid-move.
+    private void lift(View v, GradientDrawable bg, boolean has, int restColor, int focusColor,
+                      int restRadius, int focusRadius) {
+        v.animate().cancel();
+        v.animate().scaleX(has ? 1.1f : 1f).scaleY(has ? 1.1f : 1f).translationZ(has ? px(26) : 0)
+                .setDuration(FOCUS_MS).setInterpolator(FOCUS_EASE).withLayer().start();
+        tween(v, bg, has, restColor, focusColor, restRadius, focusRadius);
+    }
+
+    // Just the background part: colour and corner radius, with no view animation. Used for the
+    // dropdown rows, whose text already changes colour on focus.
+    private void tween(View v, GradientDrawable bg, boolean has, int restColor, int focusColor,
+                       int restRadius, int focusRadius) {
+        if (bg == null) return;
+        ValueAnimator old = lifts.remove(v);
+        if (old != null) old.cancel();
+        final int from = has ? restColor : focusColor, to = has ? focusColor : restColor;
+        final int r0 = has ? restRadius : focusRadius, r1 = has ? focusRadius : restRadius;
+        if (from == to && r0 == r1) return;
+        // Tweened by hand so no objects are made per frame: this runs on TVs with 2 GB of RAM.
+        final ValueAnimator a = ValueAnimator.ofFloat(0f, 1f);
+        a.setDuration(FOCUS_MS);
+        a.setInterpolator(FOCUS_EASE);
+        a.addUpdateListener(an -> {
+            float t = (float) an.getAnimatedValue();
+            if (from != to) bg.setColor(blend(from, to, t));
+            if (r0 != r1) bg.setCornerRadius(r0 + (r1 - r0) * t);
+        });
+        a.addListener(new AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(Animator an) { if (lifts.get(v) == a) lifts.remove(v); }
+        });
+        lifts.put(v, a);
+        a.start();
+    }
+
+    private static int blend(int from, int to, float t) {
+        return (channel(from, to, 24, t) << 24) | (channel(from, to, 16, t) << 16)
+                | (channel(from, to, 8, t) << 8) | channel(from, to, 0, t);
+    }
+
+    private static int channel(int from, int to, int shift, float t) {
+        int a = (from >>> shift) & 0xFF, b = (to >>> shift) & 0xFF;
+        return Math.round(a + (b - a) * t);
+    }
+
     // An icon on its own, no tile or label: a glass circle shows behind it only while it's focused.
     private ImageView addIcon(final String key, String label, Drawable icon, int x, int y) {
         int b = px(ICON_BUTTON), size = px(ICON_SIZE);
@@ -892,8 +1069,7 @@ public class MainActivity extends Activity {
         card.setContentDescription(label);
         card.setOnFocusChangeListener((v, has) -> {
             if (has) focusedKey = key;
-            bg.setColor(has ? 0x38FFFFFF : Color.TRANSPARENT);
-            v.animate().scaleX(has ? 1.1f : 1f).scaleY(has ? 1.1f : 1f).setDuration(140).withLayer().start();
+            lift(v, bg, has, Color.TRANSPARENT, 0x38FFFFFF, 0, 0);
         });
         card.setOnClickListener(v -> open(key));
         FrameLayout wrap = new FrameLayout(this);
@@ -916,9 +1092,14 @@ public class MainActivity extends Activity {
             CastHook.openReceiver(this); // port 5500 is the home screen's now; see CastHook
             return;
         } else if (SETTINGS.equals(key)) {
-            dropdown(tile(SETTINGS), SETTINGS_ITEMS, which -> {
-                if (which == 0) showWallpapers();
-                else if (which == 1) openBrightness();
+            // A box has no screen of its own to dim: its picture is the TV's, on the TV's remote. On NVIDIA
+            // Shield, Brightness also fell back to a Display & Sound page that's listed but missing there.
+            List<String> list = new ArrayList<>(Arrays.asList(SETTINGS_ITEMS));
+            if (isBox(this)) list.remove("Brightness");
+            final String[] items = list.toArray(new String[0]);
+            dropdown(tile(SETTINGS), items, which -> {
+                if ("Wallpaper".equals(items[which])) showWallpapers();
+                else if ("Brightness".equals(items[which])) openBrightness();
                 else openTvSettings();
             });
             return;
@@ -1044,9 +1225,11 @@ public class MainActivity extends Activity {
     private List<Intent> quickIntents(String name) {
         List<Intent> all = new ArrayList<>();
         String tclType = name.equals("sound") ? "SoundPreset" : name.equals("picture") ? "picture" : null;
+        // Some TCL Google TVs (Q651G, Android 12) ship the same service inside the TV's own settings app.
         if (tclType != null)
-            all.add(new Intent(TCL_SHOW_WINDOW).setClassName("com.tcl.settings", "com.tcl.settings.ShowWindowService")
-                    .putExtra("Type", tclType));
+            for (String pkg : new String[] {"com.tcl.settings", "com.android.tv.settings"})
+                all.add(new Intent(TCL_SHOW_WINDOW).setClassName(pkg, "com.tcl.settings.ShowWindowService")
+                        .putExtra("Type", tclType));
         switch (name) {
             case "bluetooth":
                 all.add(new Intent(Settings.ACTION_BLUETOOTH_SETTINGS));
@@ -1241,7 +1424,7 @@ public class MainActivity extends Activity {
             t.setBackground(focus);
             t.setFocusable(true);
             t.setOnFocusChangeListener((v, has) -> {
-                focus.setColor(has ? 0x38FFFFFF : Color.TRANSPARENT);
+                tween(t, focus, has, Color.TRANSPARENT, 0x38FFFFFF, px(RADIUS - pad), px(RADIUS - pad));
                 t.setTextColor(has ? Color.WHITE : 0xD9FFFFFF);
             });
             t.setOnClickListener(v -> {
@@ -1298,6 +1481,168 @@ public class MainActivity extends Activity {
                 buildTiles();
             }
         });
+    }
+
+    // Hold OK on an HDMI tile: name it after the box plugged into it, or take it off the home
+    // screen. Hiding keeps the input in the TV's list, so nothing about the TV changes.
+    private void showInputMenu(final String id) {
+        View anchor = tile(id);
+        if (anchor == null) return;
+        dropdown(anchor, new String[] {"Rename", "Remove from home"}, which -> {
+            if (which == 0) showInputNames(id);
+            else hideInput(id);
+        });
+    }
+
+    // The TV's own name comes first, and picking it resets the custom one; the rest are the usual
+    // things people plug in, followed by an option to type a name with the TV's keyboard.
+    private void showInputNames(final String id) {
+        TvInputInfo in = inputById(id);
+        if (in == null) return;
+        String own = tvInputLabel(in);
+        List<String> names = new ArrayList<>();
+        names.add(own);
+        for (String p : INPUT_PRESETS) if (!p.equals(own)) names.add(p);
+        // Keep canonical preset names in storage so a language change also updates the tile.
+        List<String> labels = new ArrayList<>();
+        for (int i = 0; i < names.size(); i++) labels.add(i == 0 ? own : Strings.t(names.get(i)));
+        labels.add(Strings.t("Type a name…"));
+        panel(Strings.t("Rename"), labels, which -> {
+            if (which == names.size()) {
+                showInputNameEditor(id, own);
+                return;
+            }
+            setInputName(id, which == 0 ? null : names.get(which));
+            focusedKey = id;
+            buildTiles();
+        });
+    }
+
+    private void showInputNameEditor(final String id, String own) {
+        AlertDialog.Builder builder = new AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert);
+        EditText name = new EditText(builder.getContext());
+        name.setSingleLine(true);
+        name.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        name.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        name.setFilters(new InputFilter[] {new InputFilter.LengthFilter(24)});
+        String custom = inputNames().get(id);
+        name.setText(custom != null ? custom : own);
+        final String initialName = name.getText().toString();
+        name.setSelectAllOnFocus(true);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_PX, px(32));
+        name.setTextColor(Color.WHITE);
+        FrameLayout box = new FrameLayout(builder.getContext());
+        box.setPadding(px(40), px(16), px(40), 0);
+        box.addView(name, new FrameLayout.LayoutParams(-1, -2));
+        final AlertDialog dialog = builder.setTitle(Strings.t("Rename"))
+                .setView(box)
+                .setPositiveButton(android.R.string.ok, null)
+                .setNegativeButton(android.R.string.cancel, null)
+                .create();
+        Runnable save = () -> {
+            setInputName(id, name.getText().toString());
+            dialog.dismiss();
+            focusedKey = id;
+            buildTiles();
+        };
+        name.setOnEditorActionListener((v, action, event) -> {
+            if (action == EditorInfo.IME_ACTION_DONE) {
+                save.run();
+                return true;
+            }
+            return false;
+        });
+        Window window = dialog.getWindow();
+        window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+                | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(px(RADIUS));
+        bg.setColor(0xFF231D1F);
+        bg.setStroke(Math.max(1, px(2)), 0x17FFFFFF);
+        window.setBackgroundDrawable(bg);
+        dialog.show();
+        window.setLayout(px(800), ViewGroup.LayoutParams.WRAP_CONTENT);
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> save.run());
+        name.requestFocus();
+        name.selectAll();
+        name.post(() -> {
+            ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE))
+                    .showSoftInput(name, InputMethodManager.SHOW_IMPLICIT);
+            // Some TV keyboards move the cursor on startup; reselect after their opening animation.
+            name.postDelayed(() -> {
+                if (dialog.isShowing() && name.hasFocus()
+                        && initialName.equals(name.getText().toString())) name.selectAll();
+            }, 500);
+        });
+    }
+
+    private void hideInput(String id) {
+        Set<String> hidden = hiddenInputs();
+        hidden.add(id);
+        saveHiddenInputs(hidden);
+        focusedKey = ADD;
+        buildTiles();
+    }
+
+    // Long-press on the + tile: the inputs that were taken off the home screen, to put back.
+    private void showHiddenInputs() {
+        final List<String> ids = new ArrayList<>();
+        List<String> labels = new ArrayList<>();
+        Set<String> hidden = hiddenInputs();
+        for (TvInputInfo in : allInputs()) {
+            if (!hidden.contains(in.getId())) continue;
+            ids.add(in.getId());
+            labels.add(inputLabel(in));
+        }
+        if (ids.isEmpty()) return;
+        panel(Strings.t("Show hidden inputs"), labels, which -> {
+            Set<String> now = hiddenInputs();
+            now.remove(ids.get(which));
+            saveHiddenInputs(now);
+            focusedKey = ids.get(which);
+            buildTiles();
+        });
+    }
+
+    private SharedPreferences prefs() {
+        return getSharedPreferences(PREFS, 0);
+    }
+
+    // Custom input names, keyed by the input's id. Split only at the first '=', so names can contain '='.
+    private Map<String, String> inputNames() {
+        Map<String, String> out = new HashMap<>();
+        for (String line : prefs().getString(PREF_INPUT_NAMES, "").split("\n")) {
+            int eq = line.indexOf('=');
+            if (eq > 0) out.put(line.substring(0, eq), line.substring(eq + 1));
+        }
+        return out;
+    }
+
+    // A null or blank name goes back to the TV's own label. Keep names on one storage line.
+    private void setInputName(String id, String name) {
+        if (name != null) {
+            name = name.replace("\r", "").replace("\n", "").trim();
+            if (name.isEmpty()) name = null;
+        }
+        Map<String, String> names = inputNames();
+        if (name == null) names.remove(id);
+        else names.put(id, name);
+        StringBuilder out = new StringBuilder();
+        for (Map.Entry<String, String> e : names.entrySet()) {
+            if (out.length() > 0) out.append('\n');
+            out.append(e.getKey()).append('=').append(e.getValue());
+        }
+        prefs().edit().putString(PREF_INPUT_NAMES, out.toString()).apply();
+    }
+
+    private Set<String> hiddenInputs() {
+        Set<String> out = new HashSet<>();
+        for (String id : prefs().getString(PREF_HIDDEN_INPUTS, "").split("\n")) if (!id.isEmpty()) out.add(id);
+        return out;
+    }
+
+    private void saveHiddenInputs(Set<String> ids) {
+        prefs().edit().putString(PREF_HIDDEN_INPUTS, android.text.TextUtils.join("\n", new TreeSet<>(ids))).apply();
     }
 
     // Every launchable app that isn't on the top row yet, by name. The pick is added at the end,
@@ -1440,31 +1785,86 @@ public class MainActivity extends Activity {
         return key.indexOf('/') > 0;
     }
 
-    // The TV's own HDMI inputs (not devices behind them), in order, skipping hidden ones.
+    // The TV's own HDMI inputs (not devices behind them), in order, skipping the ones taken off
+    // the home screen from the tile menu.
     private List<TvInputInfo> hdmiInputs() {
         List<TvInputInfo> out = new ArrayList<>();
-        TvInputManager tim = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
-        if (tim == null) return out;
-        for (TvInputInfo in : tim.getTvInputList()) {
-            if (in.getType() == TvInputInfo.TYPE_HDMI && in.getParentId() == null && !in.isHidden(this)) out.add(in);
-        }
-        Collections.sort(out, (a, b) -> a.getId().compareTo(b.getId()));
+        Set<String> hidden = hiddenInputs();
+        for (TvInputInfo in : allInputs()) if (!hidden.contains(in.getId())) out.add(in);
         return out.size() > MAX_INPUTS ? out.subList(0, MAX_INPUTS) : out;
     }
 
-    // The name set in Settings > Inputs (like "Bedroom"), else the TV's own name (like "HDMI 1").
+    // HDMI inputs are what a home screen shows. install.sh's FAKE_INPUT=1 takes every TV input
+    // instead, so the tiles and their menus can be tested on an emulator that has no HDMI of its own.
+    private boolean countsAsInput(TvInputInfo in) {
+        boolean fake = "1".equals(prefs().getString(PREF_FAKE_INPUTS, null));
+        return (fake || in.getType() == TvInputInfo.TYPE_HDMI) && in.getParentId() == null && !in.isHidden(this);
+    }
+
+    // Every HDMI input the TV reports that isn't switched off in its own settings, hidden or not.
+    private List<TvInputInfo> allInputs() {
+        List<TvInputInfo> out = new ArrayList<>();
+        TvInputManager tim = (TvInputManager) getSystemService(Context.TV_INPUT_SERVICE);
+        if (tim == null) return out;
+        for (TvInputInfo in : tim.getTvInputList()) if (countsAsInput(in)) out.add(in);
+        Collections.sort(out, (a, b) -> a.getId().compareTo(b.getId()));
+        return out;
+    }
+
+    // A TV has inputs of its own (HDMI, AV); a box that plugs into one, like NVIDIA Shield, Chromecast
+    // or a Mi Box, has none. Some TVs register their HDMI inputs a while after starting (#52), so with
+    // none yet it's a box only if HDMI-CEC says it's a playback device and not a TV. When unsure, it's
+    // a TV, so TVs keep their menu.
+    static boolean isBox(Context c) {
+        TvInputManager tim = (TvInputManager) c.getSystemService(Context.TV_INPUT_SERVICE);
+        if (tim != null) for (TvInputInfo in : tim.getTvInputList()) if (in.isPassthroughInput()) return false;
+        List<String> types = cecTypes("ro.hdmi.device_type"), named = cecTypes("ro.hdmi.cec_device_types");
+        if (types.contains("0") || named.contains("tv")) return false;
+        return types.contains("4") || named.contains("playback_device");
+    }
+
+    private static List<String> cecTypes(String prop) {
+        try {
+            String v = String.valueOf(Class.forName("android.os.SystemProperties")
+                    .getMethod("get", String.class).invoke(null, prop)).trim();
+            if (!v.isEmpty()) return Arrays.asList(v.split("\\s*,\\s*"));
+        } catch (Throwable ignored) {}
+        return Collections.emptyList();
+    }
+
+    private TvInputInfo inputById(String id) {
+        for (TvInputInfo in : allInputs()) if (in.getId().equals(id)) return in;
+        return null;
+    }
+
+    // The name picked on the TV, else the one set in Settings > Inputs (like "Bedroom"), else the
+    // TV's own name (like "HDMI 1").
     private String inputLabel(TvInputInfo in) {
-        CharSequence custom = in.loadCustomLabel(this);
-        if (custom != null && custom.length() > 0) return withoutDeviceType(custom.toString());
-        CharSequence label = in.loadLabel(this);
-        return label != null && label.length() > 0 ? withoutDeviceType(label.toString()) : "HDMI";
+        String custom = inputNames().get(in.getId());
+        return custom != null ? Strings.t(custom) : tvInputLabel(in);
+    }
+
+    private String tvInputLabel(TvInputInfo in) {
+        String custom = inputLabelOrNull(in.loadCustomLabel(this));
+        if (custom != null) return custom;
+        String label = inputLabelOrNull(in.loadLabel(this));
+        return label != null ? label : "HDMI";
+    }
+
+    private static String inputLabelOrNull(CharSequence raw) {
+        if (raw == null || raw.length() == 0) return null;
+        String label = withoutDeviceType(raw.toString());
+        return "Philips".equalsIgnoreCase(android.os.Build.MANUFACTURER)
+                && (label.isEmpty() || "null".equals(label)) ? null : label;
     }
 
     // Philips stores a name as "name&DEVICE_TYPE" (like "Computer&COMPUTER"), so show the name only.
+    // Missing Philips names/types can be the literal "null"; a missing name uses the next fallback.
     // Only on Philips TVs: elsewhere a name like "AUDIO&VIDEO" is the name itself.
     private static String withoutDeviceType(String label) {
         if (!"Philips".equalsIgnoreCase(android.os.Build.MANUFACTURER)) return label;
         int amp = label.lastIndexOf('&');
+        if (amp >= 0 && (label.endsWith("&") || label.endsWith("&null"))) return label.substring(0, amp).trim();
         return amp > 0 && label.substring(amp + 1).matches("[A-Z][A-Z0-9_]{2,}") ? label.substring(0, amp).trim() : label;
     }
 

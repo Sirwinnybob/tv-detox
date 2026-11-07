@@ -61,8 +61,17 @@ com.google.android.inputmethod.latin com.android.inputmethod.latin com.google.an
 com.tcl.inputmethod.international com.android.providers.userdictionary
 com.google.android.tungsten.setupwraith com.google.android.onetimeinitializer
 com.google.android.partnersetup com.android.provision com.android.tv.provision com.android.managedprovisioning
-com.tcl.suspension com.tcl.tvinput com.tcl.providers.config com.tcl.useragreement
+com.tcl.suspension com.tcl.tvinput com.tcl.tv com.tcl.providers.config com.tcl.useragreement
 com.tcl.settings com.tcl.tcl_bt_rcu_service com.google.android.apps.tv.launcherx"
+# https://tvslim.app/packages/ never-disable list: Home routing, remote, TV, HDMI, channels, UI, power and core TV service.
+NEVER="$NEVER org.droidtv.homeintentresolver org.droidtv.GlobalKey org.droidtv.playtv
+org.droidtv.hdmiservice org.droidtv.channels org.droidtv.tvsystemui
+org.droidtv.tvpowermanagerservice org.droidtv.tv.tptvservice"
+# https://tvdebloat.com/data/sources/philips-50pus8517.txt DO NOT DISABLE: eum/aurora leave persistent org.droidtv.xtv in a retry loop.
+NEVER="$NEVER org.droidtv.lkb org.droidtv.xtv org.droidtv.settings
+org.droidtv.menudataapp org.droidtv.eum org.droidtv.aurora"
+# MediaTek TVs (TCL 32S4K, MT5867): tvcenter is the screen that shows HDMI, tvinput the inputs, tv.service the remote's keys.
+NEVER="$NEVER com.mediatek.wwtv.tvcenter com.mediatek.tvinput com.mediatek.tv.service com.mediatek.wwtv.setupwizard"
 
 # Turn off only if you don't use the feature they carry.
 KEEP="com.google.android.apps.mediashell com.google.android.katniss
@@ -70,7 +79,7 @@ com.google.android.tv.assistant com.google.android.marvin.talkback
 com.google.android.tv.remote.service com.google.android.tts
 com.google.android.syncadapters.contacts com.google.android.syncadapters.calendar
 com.ansub.tvhome com.google.android.webview com.tcl.android.webview
-com.tcl.tv com.tcl.micmanager
+com.tcl.micmanager
 com.android.dreams.basic com.google.android.apps.tv.dreamx"
 
 # Commonly preinstalled junk: ads, sponsored rows, unused vendor and Google apps.
@@ -81,11 +90,14 @@ com.android.printspooler com.android.htmlviewer com.android.soundpicker
 com.tcl.waterfall.overseas com.tcl.esticker com.tcl.partnercustomizer
 com.tcl.messagebox com.tcl.smartalexa com.tcl.copydatatotv com.tcl.audioplayer
 com.tcl.imageplayer com.tcl.keyhelp com.tcl.usercenter
-com.tcl.dashboard com.tcl.ttvs com.tcl.micmanager com.tcl.factory.view"
+com.tcl.dashboard com.tcl.ttvs com.tcl.micmanager com.tcl.factory.view
+com.tcl.logkit fusion.android.tv.demo com.mediatek.MtkDemo android.autoinstalls.config.google.gtvpai"
 
 dump=$(sh_tv dumpsys package) || lost
 all=$(sh_tv pm list packages) || lost
 off=$(sh_tv pm list packages -d) || lost
+# Android erases the Wi-Fi networks an app saved when that app is turned off. Empty on Ethernet.
+wifi=$(sh_tv "dumpsys wifi | grep -o 'cname=[^ ]*'" | sed -n 's/^cname=//p' | sort -u) || wifi=
 printf '%s\n' "$dump" | grep -q 'Package \[' || lost
 printf '%s\n' "$all" | grep -q '^package:' || lost
 all=$(printf '%s\n' "$all" | sed -n 's/^package://p')
@@ -102,6 +114,7 @@ printf '%s\n' "$dump" | awk '
 
 printf '%s\n' "$all" > "$tmp/all"
 printf '%s\n' "$off" > "$tmp/off"
+printf '%s\n' "$wifi" > "$tmp/wifi"
 
 # Plain-English names, so the list reads like a list of apps and not package names.
 cat > "$tmp/names" <<'EOF'
@@ -155,19 +168,29 @@ com.tcl.ttvs	TCL analytics and Alexa hooks
 com.tcl.providers.config	TCL settings store
 com.tcl.settings	TCL settings
 com.tcl.tvinput	TV input framework
-com.tcl.tv	Live TV
+com.tcl.tv	Live TV and the HDMI screen
 com.tcl.tcl_bt_rcu_service	Bluetooth remote
 com.google.android.tvlauncher	Google TV home screen
 com.google.android.apps.tv.launcherx	Google TV home screen
 com.google.android.leanbacklauncher	Android TV home screen
 com.google.android.tungsten.setupwraith	Google TV setup
 com.dolby.android.audio.service	Dolby audio
+org.droidtv.homeintentresolver	Philips Home key router
+org.droidtv.GlobalKey	Philips remote buttons
 com.ansub.tvhome	TV Detox home screen
 com.tcl.inputmethod.international	TV keyboard
 com.google.android.webview	Web pages inside apps
 com.tcl.android.webview	Web pages inside apps
 com.google.android.apps.nbu.smartconnect.tv	Google TV phone pairing
 com.android.providers.userdictionary	Keyboard dictionary
+com.mediatek.wwtv.tvcenter	Live TV and the HDMI screen
+com.mediatek.tvinput	TV input framework
+com.mediatek.tv.service	TV service and remote keys
+com.mediatek.wwtv.setupwizard	TV setup
+com.tcl.logkit	TCL logs
+fusion.android.tv.demo	Store demo
+com.mediatek.MtkDemo	Store demo
+android.autoinstalls.config.google.gtvpai	Partner app auto-installer
 EOF
 
 # One line each: the awk that ships with macOS won't take a newline inside -v.
@@ -179,17 +202,20 @@ awk -F'\t' -v never="$NEVER" -v keep="$KEEP" -v safe="$SAFE" -v tmp="$tmp" '
     n=split(safe,x," ");  for (i=1;i<=n;i++) if (x[i]!="") SF[x[i]]=1
     while ((getline l < (tmp "/flags")) > 0) { split(l,y,"\t"); FL[y[1]]=y[2] }
     while ((getline l < (tmp "/off")) > 0) OF[l]=1
+    while ((getline l < (tmp "/wifi")) > 0) if (l!="") WF[l]=1
     while ((getline l < (tmp "/names")) > 0) { split(l,y,"\t"); NM[y[1]]=y[2] }
     ORD["never"]=0; ORD["keep"]=1; ORD["safe"]=2; ORD["review"]=3
     while ((getline l < (tmp "/all")) > 0) {
       p=l; st=(p in OF) ? "off" : "on"
       if (FL[p] ~ /PERSISTENT/) v="never"
+      else if (p in WF) v="never"
       else if (p in NV) v="never"
       else if (p in KP) v="keep"
       else if (p in SF) v="safe"
       else v="review"
       name=(p in NM) ? NM[p] : ""
       if (FL[p] ~ /PERSISTENT/) name=(name=="" ? "" : name " ") "(Android keeps it running)"
+      if (p in WF) name=(name=="" ? "" : name " ") "(saved your Wi-Fi: turning it off erases the network)"
       printf "%d\t%s\t%s\t%s\t%s\n", ORD[v], v, st, p, name
       C[v]++
     }

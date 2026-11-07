@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.ansub.tvhome.weather" android:versionCode="16" android:versionName="1.5.3-weather">
+    package="com.ansub.tvhome.weather" android:versionCode="20" android:versionName="1.5.7-weather">
     <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="34" />
     <!-- Only for the network tile: Wi-Fi, Ethernet or offline, and the Wi-Fi signal. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -24,8 +24,12 @@
         <intent><action android:name="android.settings.SOUND_SETTINGS" /></intent>
         <intent><action android:name="android.settings.DISPLAY_SETTINGS" /></intent>
         <package android:name="com.tcl.settings" />
+        <!-- Some TCL Google TVs ship TCL's Picture and Sound panels inside TvSettings. -->
+        <package android:name="com.android.tv.settings" />
         <!-- Google TV's HDMI input player, so HDMI tiles can see when the TV sends HDMI to it. -->
         <package android:name="com.google.android.tv.inputplayer" />
+        <!-- Google TV's own home screen, which HomeButton opens when Back is held. -->
+        <package android:name="com.google.android.apps.tv.launcherx" />
         <!-- VNC Cast Receiver, started on demand when a sender connects (CastHook). -->
         <package android:name="com.kkc.vnccast.receiver" />
     </queries>
@@ -33,7 +37,7 @@
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
-    <application android:label="Home+" android:allowBackup="false"
+    <application android:label="Home+" android:allowBackup="false" android:banner="@drawable/banner" android:icon="@drawable/icon"
         android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen">
         <activity android:name="com.ansub.tvhome.MainActivity"
             android:exported="true"
@@ -46,6 +50,19 @@
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
+            <!-- A tile in the TV's own apps row, for TVs where the TV's home screen stays on. -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
         </activity>
+        <!-- Opt-in: makes Home open this home screen where the TV's own has to stay on (Google TV). -->
+        <service android:name="com.ansub.tvhome.HomeButton" android:label="Home button" android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/home_button" />
+        </service>
     </application>
 </manifest>
