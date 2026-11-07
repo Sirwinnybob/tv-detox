@@ -18,7 +18,7 @@ final class WeatherIcon extends Drawable {
     private final int kind;
     private final boolean day;
     private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG), line = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Path path = new Path(), cut = new Path();
+    private final Path path = new Path(), moon = new Path(), cut = new Path();
     private final RectF r = new RectF();
     private float s;
 
@@ -65,6 +65,7 @@ final class WeatherIcon extends Drawable {
                 cloud(c, 0, -8, DARK_CLOUD);
                 fill.setColor(BOLT);
                 path.reset();
+                path.setFillType(Path.FillType.WINDING);
                 path.moveTo(54 * s, 62 * s);
                 path.lineTo(40 * s, 82 * s);
                 path.lineTo(50 * s, 82 * s);
@@ -114,26 +115,26 @@ final class WeatherIcon extends Drawable {
                         (float) (cx + Math.cos(a) * out) * s, (float) (cy + Math.sin(a) * out) * s, line);
             }
         } else {
+            // Its own path: op() can switch a path to even-odd filling, which reset() keeps.
             fill.setColor(MOON);
-            path.reset();
-            path.addCircle(cx * s, cy * s, rad * 1.15f * s, Path.Direction.CW);
+            moon.reset();
+            moon.addCircle(cx * s, cy * s, rad * 1.15f * s, Path.Direction.CW);
             cut.reset();
             cut.addCircle((cx + rad * 0.65f) * s, (cy - rad * 0.45f) * s, rad * s, Path.Direction.CW);
-            path.op(cut, Path.Op.DIFFERENCE);
-            c.drawPath(path, fill);
+            moon.op(cut, Path.Op.DIFFERENCE);
+            c.drawPath(moon, fill);
         }
     }
 
-    // A soft cloud: three puffs on a rounded base, moved by (dx, dy).
+    // A soft cloud: three puffs on a rounded base, moved by (dx, dy). Drawn as separate solid shapes,
+    // not one path, so where they overlap they can't cancel out into a checkered look.
     private void cloud(Canvas c, float dx, float dy, int color) {
         fill.setColor(color);
-        path.reset();
-        path.addCircle((32 + dx) * s, (56 + dy) * s, 15 * s, Path.Direction.CW);
-        path.addCircle((52 + dx) * s, (45 + dy) * s, 21 * s, Path.Direction.CW);
-        path.addCircle((71 + dx) * s, (57 + dy) * s, 14 * s, Path.Direction.CW);
+        c.drawCircle((32 + dx) * s, (56 + dy) * s, 15 * s, fill);
+        c.drawCircle((52 + dx) * s, (45 + dy) * s, 21 * s, fill);
+        c.drawCircle((71 + dx) * s, (57 + dy) * s, 14 * s, fill);
         r.set((17 + dx) * s, (55 + dy) * s, (86 + dx) * s, (71 + dy) * s);
-        path.addRoundRect(r, 8 * s, 8 * s, Path.Direction.CW);
-        c.drawPath(path, fill);
+        c.drawRoundRect(r, 8 * s, 8 * s, fill);
     }
 
     private void stroke(int color, float width) {
