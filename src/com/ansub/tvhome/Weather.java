@@ -28,10 +28,15 @@ final class Weather {
     // One place, now. Temperatures are in Celsius, as Open-Meteo sends them.
     static final class Place {
         String name;
-        double now, high, low;
+        double now, high, low, wind; // wind in km/h
         int code;
         boolean day, korean;
+
+        // Windy only matters when nothing is falling: then it gets its own look and label.
+        boolean windy() { return wind >= WINDY_KMH && code <= 3; }
     }
+
+    static final double WINDY_KMH = 40; // about 25 mph
 
     private Weather() {}
 
@@ -59,7 +64,7 @@ final class Weather {
             lon.append(s.lon);
         }
         return "https://api.open-meteo.com/v1/forecast?latitude=" + lat + "&longitude=" + lon
-                + "&current=temperature_2m,weather_code,is_day&daily=temperature_2m_max,temperature_2m_min"
+                + "&current=temperature_2m,weather_code,is_day,wind_speed_10m&daily=temperature_2m_max,temperature_2m_min"
                 + "&timezone=auto&forecast_days=1";
     }
 
@@ -104,6 +109,7 @@ final class Weather {
                 w.now = now.getDouble("temperature_2m");
                 w.code = now.getInt("weather_code");
                 w.day = now.optInt("is_day", 1) == 1;
+                w.wind = now.optDouble("wind_speed_10m", 0);
                 w.high = day.getJSONArray("temperature_2m_max").getDouble(0);
                 w.low = day.getJSONArray("temperature_2m_min").getDouble(0);
                 out[i] = w;
@@ -119,38 +125,25 @@ final class Weather {
     static long c(double c) { return Math.round(c); }
     static String both(double c) { return f(c) + "°F / " + c(c) + "°C"; }
 
-    // WMO weather codes, as Open-Meteo documents them, in English or Korean.
-    static String sky(int code, boolean ko) {
-        String en = sky(code);
-        if (!ko) return en;
-        switch (en) {
-            case "Clear": return "맑음";
-            case "Mostly clear": return "대체로 맑음";
-            case "Partly cloudy": return "구름 조금";
-            case "Cloudy": return "흐림";
-            case "Fog": return "안개";
-            case "Drizzle": return "이슬비";
-            case "Rain": return "비";
-            case "Snow": return "눈";
-            case "Showers": return "소나기";
-            case "Snow showers": return "소낙눈";
-            case "Thunderstorm": return "뇌우";
-            default: return "";
-        }
-    }
+    // Every WMO weather code Open-Meteo sends: code, English, Korean.
+    private static final Object[][] SKY = {
+        {0, "Clear", "맑음"}, {1, "Mostly clear", "대체로 맑음"}, {2, "Partly cloudy", "구름 조금"},
+        {3, "Cloudy", "흐림"}, {45, "Fog", "안개"}, {48, "Freezing fog", "어는 안개"},
+        {51, "Light drizzle", "약한 이슬비"}, {53, "Drizzle", "이슬비"}, {55, "Heavy drizzle", "강한 이슬비"},
+        {56, "Freezing drizzle", "어는 이슬비"}, {57, "Heavy freezing drizzle", "강한 어는 이슬비"},
+        {61, "Light rain", "약한 비"}, {63, "Rain", "비"}, {65, "Heavy rain", "폭우"},
+        {66, "Freezing rain", "어는 비"}, {67, "Heavy freezing rain", "강한 어는 비"},
+        {71, "Light snow", "약한 눈"}, {73, "Snow", "눈"}, {75, "Heavy snow", "폭설"}, {77, "Snow grains", "싸락눈"},
+        {80, "Light showers", "약한 소나기"}, {81, "Showers", "소나기"}, {82, "Heavy showers", "강한 소나기"},
+        {85, "Snow showers", "소낙눈"}, {86, "Heavy snow showers", "강한 소낙눈"},
+        {95, "Thunderstorm", "뇌우"}, {96, "Thunderstorm, hail", "우박 뇌우"}, {99, "Thunderstorm, heavy hail", "강한 우박 뇌우"},
+    };
 
-    private static String sky(int code) {
-        if (code == 0) return "Clear";
-        if (code == 1) return "Mostly clear";
-        if (code == 2) return "Partly cloudy";
-        if (code == 3) return "Cloudy";
-        if (code == 45 || code == 48) return "Fog";
-        if (code >= 51 && code <= 57) return "Drizzle";
-        if (code >= 61 && code <= 67) return "Rain";
-        if (code >= 71 && code <= 77) return "Snow";
-        if (code >= 80 && code <= 82) return "Showers";
-        if (code == 85 || code == 86) return "Snow showers";
-        if (code >= 95) return "Thunderstorm";
-        return "";
+    // The sky in English or Korean, with "windy" added when it's windy; "" for an unknown code.
+    static String sky(Place p, boolean ko) {
+        String text = "";
+        for (Object[] row : SKY) if ((Integer) row[0] == p.code) text = (String) row[ko ? 2 : 1];
+        if (p.windy()) text = text.isEmpty() ? (ko ? "바람 많음" : "Windy") : text + (ko ? ", 바람 많음" : ", windy");
+        return text;
     }
 }

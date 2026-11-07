@@ -630,9 +630,9 @@ public class MainActivity extends Activity {
             Weather.Place p = places == null || i >= places.length ? null : places[i];
             w.card.setVisibility(p == null ? View.GONE : View.VISIBLE);
             if (p == null) continue;
-            w.icon.setImageDrawable(new WeatherIcon(p.code, p.day));
+            w.icon.setImageDrawable(new WeatherIcon(p.code, p.day, p.windy()));
             // Glass with a glow from the top left in the weather's colour.
-            int tint = WeatherIcon.tint(p.code, p.day);
+            int tint = WeatherIcon.tint(p.code, p.day, p.windy());
             GradientDrawable glass = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
                     new int[] {0x1AFFFFFF, 0x0AFFFFFF});
             glass.setCornerRadius(px(RADIUS + 6));
@@ -645,7 +645,7 @@ public class MainActivity extends Activity {
             t.setSpan(new android.text.style.AbsoluteSizeSpan(px(36)), f.length(), t.length(), 0);
             t.setSpan(new android.text.style.ForegroundColorSpan(0xB3FFFFFF), f.length(), t.length(), 0);
             w.temp.setText(t);
-            String sky = Weather.sky(p.code, p.korean);
+            String sky = Weather.sky(p, p.korean);
             w.sky.setText(sky.isEmpty() ? p.name : p.name + "  ·  " + sky);
             w.range.setText((p.korean ? "최고 " : "High ") + Weather.both(p.high)
                     + (p.korean ? "   ·   최저 " : "   ·   Low ") + Weather.both(p.low));
